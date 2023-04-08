@@ -1,0 +1,1153 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import pandas as pd
+import time
+import json
+import ssl
+import datetime
+import socket
+import configparser
+import urllib
+from urllib.request import urlopen
+import _thread as thread
+import matplotlib as mpl
+from matplotlib.dates import DateFormatter
+
+from matplotlib.widgets import Button
+from os import system
+from tkinter import *
+
+
+import tkinter
+import numpy as np
+import random
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from collections import deque
+import websocket
+import threading
+
+from Datafeed_loading_thread import Datafeed_loading_thread
+from UI_object_base import UI_object_base
+
+mpl.rcParams['toolbar'] = 'None'
+
+socket.setdefaulttimeout(10)
+
+ssl._create_default_https_context = ssl._create_unverified_context
+
+import logging
+
+LOG_FORMAT = "%(asctime)s - %(levelname)s - (%(module)s...%(funcName)s) - %(message)s"
+logging.basicConfig(level=logging.ERROR, format=LOG_FORMAT)
+
+
+label_default_color = 'white'
+label_alert_color = '#FFFF00'
+label_blink_color = 'Salmon'
+
+alert_price_line_color_default = 'purple'
+alert_price_below_color = 'OrangeRed' # OrangeRed GoldenRod  Gold
+alert_price_high_color = 'OrangeRed'
+
+
+price_high_posi = '注意: 注意: 高位: 高位突破'
+price_low_posi = '注意: 注意: 低位: 低位突破'
+
+
+class RealtimeGraphBase(UI_object_base) :
+
+    def __init__(self, cfg_filename='', title=""):
+        super().__init__(cfg_filename, title)
+        logging.info("init......")
+
+        self.count = 0
+        self.price_deque = deque(maxlen=100)
+        self.prod_price = 0.0
+        self.prod_volume = 0
+        self.last_price = 0.0
+        self.sound_notified = False
+        self.high_low_prefix = ''
+        self.price_change_notify_time = ''
+        self.alert_price = ''
+        self.play_price_sound = False
+        self.looping_words = ''
+        self.show_scrolling_msg = True
+        self.alert_price_above = 0.0
+
+        self.warning_msg_alerted = False
+        self.config_panel_showed = False
+
+        self.btn_label_hold = '暂停 ...'
+        self.btn_label_start = '运行中 ...'
+
+        self.time_to_wait = 3
+
+        self.price_data = np.zeros(50000)
+        self.dataframe_time = pd.DataFrame(columns=['Open'])
+
+        self.volume_data = np.zeros(50000)
+
+        self.cfg_filename = cfg_filename
+
+        self.prod_name = '数据'
+
+        self.last_price_fetchtime=''
+        self.last_volume_fetchtime=''
+        self.last_volume = 0
+        self.last_volume_count = 0
+
+        self.last_refreshed_data_price=''
+        self.last_refreshed_data_fetchtime=''
+        self.last_refreshed_data_count=0
+        self.last_refreshed_data_volume=0
+
+        self.volume_update_receive_time = ''
+
+        self.log_level_label_info = '  I  '
+        self.log_level_label_error = '  E  '
+
+        self.annotate_high_low_price = False
+
+        self.minor_adjust_gap = 0.0
+        self.high_times_for_minor_adjust_gap = 5
+        self.low_times_for_minor_adjust_gap = 5
+
+        self.price_display_offset = 0.0
+
+        cf = configparser.ConfigParser()
+        cf.read(self.cfg_filename)
+
+        self.panel_width = 6.88
+        self.panel_height = 4.9
+        self.annotate_offset = '{0:.2f}'
+        self.time_seq_window_size = 100
+
+        self.market_open_list = []
+        self.datafeed_list = []
+
+        self.panel_width = cf.getfloat('config', 'panel_width')
+        self.panel_height = cf.getfloat('config', 'panel_height')
+
+        self.number_position_to_adjuct = cf.getint('config', 'number_position_to_adjuct')
+        self.ax_y_default_offset = cf.getfloat('config', 'ax_y_default_offset')
+        self.annotate_offset = '{0:' + cf.get('config', 'annotate_offset') + '}'
+        self.time_seq_window_size = cf.getint('config', 'time_seq_window_size')
+        self.minor_adjust_gap = cf.getfloat('config', 'minor_adjuct_gap')
+
+        self.alert_price_above_line_color = alert_price_line_color_default
+        self.alert_price_below_line_color = alert_price_line_color_default
+
+        self.digit_after_dot = 2
+        if '3' in self.annotate_offset:
+            self.digit_after_dot = 3
+
+        if '4' in self.annotate_offset:
+            self.digit_after_dot = 4
+
+        self.round_po_num = 2
+        if int(self.digit_after_dot) >= 3:
+            self.round_po_num = int(self.digit_after_dot)
+
+        if cf.has_option('config', 'market_open_time_reminder'):
+            now_date = datetime.datetime.today().strftime("%Y-%m-%d")
+            self.market_open_list = (cf.get('config', 'market_open_time_reminder')).split('//')
+            for i in range(len(self.market_open_list)):
+                market_open = now_date + ' ' + self.market_open_list[i]
+                market_open_date = datetime.datetime.strptime(market_open, "%Y-%m-%d %H:%M:%S")
+                market_open_num = mdates.datestr2num(market_open_date.strftime("%Y-%m-%d %H:%M:%S"))
+                self.market_open_list[i] = market_open_num
+
+        if cf.has_option('config', 'price_deque_length'):
+            deque_length = cf.getint('config', 'price_deque_length')
+            self.price_deque = deque(maxlen=deque_length)
+
+        if cf.has_option('config', 'annotate_high_low_price'):
+            self.annotate_high_low_price = cf.getboolean('config', 'annotate_high_low_price')
+
+        self.change_data_direction_flag = False
+        self.change_data_direction_factor = 0
+        if cf.has_option('config', 'change_data_direction_flag'):
+            self.change_data_direction_flag = cf.getboolean('config', 'change_data_direction_flag')
+        if cf.has_option('config', 'change_data_direction_factor'):
+            self.change_data_direction_factor = cf.getint('config', 'change_data_direction_factor')
+
+
+    def manual_init(self, title="fx678 realtime cl price", main_window=None, use_main=False,
+                    window_width=6.4, window_height=6.26, time_seq_length=0):
+
+
+        self.offset_ref = 0.05
+        self.ax_y_low_offset = 0.005
+        self.ax_y_high_offset = 0.005
+
+        self.min_max='abs'
+        self.refresh_figure=True
+        self.price_threshold=0.2
+
+        self.hline_color_default='red'
+        self.hline_color_alert='green'
+        self.hline_color=self.hline_color_default
+
+        self.curr_highline_color = 'Navy'
+        self.curr_lowline_color = 'Navy'
+
+        self.hline_style_default='dotted'
+        self.hline_style_alert=(0, (5, 10))
+        self.hline_style = self.hline_style_default
+
+        if window_width !=0.0 and window_height !=0.0:
+            self.panel_width = window_width
+            self.panel_height = window_height
+
+        if time_seq_length != 0:
+            self.time_seq_window_size = time_seq_length
+
+        # self.load_init_data_v2()
+
+        if self.ax_y_high_offset == 0.005:
+            self.ax_y_high_offset = round(float(self.price_data[self.count-1])+self.ax_y_default_offset, self.round_po_num)
+            self.ax_y_low_offset = round(float(self.price_data[self.count-1])-self.ax_y_default_offset, self.round_po_num)
+
+
+        start_mainloop = False
+
+        if main_window != None:
+            if use_main:
+                self.root_window = main_window
+            else:
+                self.root_window = tkinter.Toplevel(main_window)
+        else:
+            self.root_window = tkinter.Tk()  # 创建tkinter的主窗口
+            start_mainloop = True
+
+        # self.root_window.title(title)
+
+        # Create a figure on screen and set the title
+        self.fig = plt.figure(figsize=(self.panel_width, self.panel_height))
+        self.fig.suptitle(title)
+
+
+        self.net_worth_ax = self.fig.add_subplot(111)
+
+        self.net_worth_ax.yaxis.set_ticks_position('right')
+
+        plt.subplots_adjust(left=0.01, bottom=0.07,
+                            right=0.89, top=0.93, wspace=0.2, hspace=0)
+
+        # Show the graph without blocking the rest of the program
+
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.root_window)
+        self.canvas.draw()  # 注意show方法已经过时了,这里改用draw
+        self.canvas.get_tk_widget().grid(row=0, column=0, columnspan=5)
+
+
+
+        self.high_low_frame = tkinter.Frame(master=self.root_window)
+        self.high_low_frame.grid(row=1, column=0, columnspan=5)
+        self.high_low_window(self.high_low_frame)
+
+        self.config_offset_frame = tkinter.Frame(master=self.root_window)
+        self.config_offset_window(self.config_offset_frame)
+
+        self.scrolling_msg_label_value = tkinter.StringVar()
+        self.scrolling_msg_label_value.set('......')
+
+        self.scrolling_msg_label = tkinter.Label(self.root_window, textvariable=self.scrolling_msg_label_value,
+                                             fg='purple', bg='lightgrey', font=('Arial', self.font_26))
+        self.scrolling_msg_label.grid(row=2, column=0, columnspan=5, sticky=E+W)
+        self.scrolling_msg_label.bind('<Double-1>', self.scrolling_msg_label_double_event)
+
+
+        # 100个缓存中最大值
+        self.realtime_price_highest_text = tkinter.StringVar()
+        self.realtime_price_highest_text.set('999.99')
+
+        self.realtime_price_highest_label = tkinter.Label(self.root_window, textvariable=self.realtime_price_highest_text,
+                                                          width=6, fg='LightSlateGrey', bg='lightgrey',
+                                                          font=('Arial', self.font_20))
+        self.realtime_price_highest_label.grid(row=2, column=0, columnspan=1, sticky=W+N+S)
+
+
+        # 100个缓存中最小值
+        self.realtime_price_lowest_text = tkinter.StringVar()
+        self.realtime_price_lowest_text.set('999.99')
+
+        self.realtime_price_lowest_label = tkinter.Label(self.root_window, textvariable=self.realtime_price_lowest_text,
+                                                         width=6, fg='LightSlateGrey', bg='lightgrey',
+                                                         font=('Arial', self.font_20))
+        self.realtime_price_lowest_label.grid(row=2, column=4, columnspan=1, sticky=E+N+S)
+
+        # 显示滚动字 3 x 1000 = 3000 ms 更新一次
+        def scrolling_msg_loop():
+
+            self.show_scrolling_msg_content()
+            self.schedule_tasks()
+            self.root_window.update()
+            self.scrolling_msg_label.after(3 * 1000, scrolling_msg_loop)
+
+        self.scrolling_msg_label.after(3 * 1000, scrolling_msg_loop)
+
+        # 更新线图， 3 x 100 = 300 ms 更新一次
+        def graph_update_loop():
+
+            try:
+                if (self.prod_price != self.last_refreshed_data_price) \
+                        or (self.count != self.last_refreshed_data_count) \
+                        or self.is_volume_updated():
+
+                    # 时间敏感型，预先保留数据
+                    price_now = self.prod_price + self.price_display_offset
+                    price_time = self.last_price_fetchtime
+                    count_now = self.count
+                    volume_now = self.prod_volume
+
+                    gap_baseline = self.minor_adjust_gap * 5
+                    high_gap_baseline = self.minor_adjust_gap * self.high_times_for_minor_adjust_gap
+                    low_gap_baseline = self.minor_adjust_gap * self.low_times_for_minor_adjust_gap
+                    if((self.ax_y_high_offset - price_now) <= high_gap_baseline):
+                        self.ax_y_high_offset = self.ax_y_high_offset + gap_baseline
+                        self.ax_y_low_offset = self.ax_y_low_offset + gap_baseline
+                    elif ((price_now - self.ax_y_low_offset) <= low_gap_baseline):
+                        self.ax_y_high_offset = self.ax_y_high_offset - gap_baseline
+                        self.ax_y_low_offset = self.ax_y_low_offset - gap_baseline
+
+                    self.ax_y_high_offset = round(self.ax_y_high_offset, self.round_po_num)
+                    self.ax_y_low_offset = round(self.ax_y_low_offset, self.round_po_num)
+
+                    logging.info(self.prod_name + ' graph_update_start ')
+
+                    if self.warning_msg_alerted:
+                        self.scrolling_msg_label.config(bg='lightgrey')
+                        self.warning_msg_alerted = False
+
+                    self.render(self.count, float(self.prod_price), window_size=self.time_seq_window_size)
+                    self.root_window.update()
+
+                    self.last_refreshed_data_price = price_now
+                    self.last_refreshed_data_fetchtime = price_time
+                    self.last_refreshed_data_count = count_now
+                    self.last_refreshed_data_volume = volume_now
+                    logging.info(self.prod_name + ' graph_update_finished ')
+
+            except IndexError as ie:
+                logging.error(ie)
+                self.price_data[self.count] = self.prod_price
+                self.volume_data[self.count] = self.prod_volume
+            except Exception as e:
+                logging.error(e)
+
+            self.realtime_price_lowest_label.after(self.time_to_wait * 200, graph_update_loop)
+
+        self.realtime_price_lowest_label.after(self.time_to_wait * 200, graph_update_loop)
+
+        self.realtime_price_highest_label.bind('<Double-1>', self.reconnect_df)
+        self.realtime_price_lowest_label.bind('<Double-1>', self.switch_config_offset_window)
+
+        if start_mainloop:
+            self.root_window.mainloop()
+
+
+    def high_low_window(self, mainwindow=None):
+        major_window = mainwindow
+        # for test purpose
+        self.button_value = tkinter.StringVar()
+        self.button_value.set(self.btn_label_hold)
+        self.B = tkinter.Button(major_window, textvariable=self.button_value, font=('Arial', self.font_22), width=6, height=1,
+                                command=self.btncallback)
+        self.B.grid(row=0, column=4)
+
+        self.btn_high_plus = tkinter.Button(major_window, text='+', font=('Arial', self.font_16),
+                                command=self.btn_high_plus_event)
+        self.btn_high_plus.grid(row=0, column=0)
+
+        self.btn_high_minus = tkinter.Button(major_window, text='-', font=('Arial', self.font_16),
+                                command=self.btn_high_minus_event)
+        self.btn_high_minus.grid(row=0, column=1)
+
+        self.L1 = tkinter.Label(major_window, text=" H ", font=('Arial', self.font_20))
+        self.L1.grid(row=0, column=2)
+
+        self.E1_value = tkinter.StringVar()
+        self.E1_value.set('')
+        self.E1 = tkinter.Entry(major_window, textvariable=self.E1_value, bd=1, fg='blue', width=6, font=('Arial', self.font_24))
+        self.E1.grid(row=0, column=3)
+
+        self.E2_value = tkinter.StringVar()
+        self.E2_value.set('')
+        self.E2 = tkinter.Entry(major_window, textvariable=self.E2_value, bd=1, fg='blue', width=6, font=('Arial', self.font_24))
+        self.E2.grid(row=0, column=5)
+
+        self.L2 = tkinter.Label(major_window, text=" L ", font=('Arial', self.font_20))
+        self.L2.grid(row=0, column=6)
+
+        self.btn_low_plus = tkinter.Button(major_window, text='+', font=('Arial', self.font_16),
+                                            command=self.btn_low_plus_event)
+        self.btn_low_plus.grid(row=0, column=7)
+
+        self.btn_low_minus = tkinter.Button(major_window, text='-', font=('Arial', self.font_16),
+                                             command=self.btn_low_minus_event)
+        self.btn_low_minus.grid(row=0, column=8)
+
+        self.L1.bind('<Button-1>', self.L1_double_event)
+        self.L2.bind('<Button-1>', self.L2_double_event)
+
+        self.E1.bind('<Key-Return>', self.Entry_on_changed_event)
+        self.E2.bind('<Key-Return>', self.Entry_on_changed_event)
+
+
+    def config_offset_window(self, mainwindow=None):
+        major_window = mainwindow
+        # for test purpose
+
+        self.btn_offset = tkinter.Button(major_window, text="设边界", font=('Arial', self.font_22), width=6, height=1,
+                                command=self.config_offset_value)
+        self.btn_offset.grid(row=0, column=2)
+
+
+        h_offset_label = tkinter.Label(major_window, text=" H ", font=('Arial', self.font_20))
+        # self.L1.pack(side=tkinter.LEFT)
+        h_offset_label.grid(row=0, column=0)
+
+
+        # width=8, 6
+        self.h_offset_value = tkinter.StringVar()
+        self.h_offset_value.set('')
+        h_offset_entry = tkinter.Entry(major_window, textvariable=self.h_offset_value, bd=1, fg='blue', width=6, font=('Arial', self.font_24))
+        # self.E1.pack(side=tkinter.LEFT)
+        h_offset_entry.grid(row=0, column=1)
+
+        self.l_offset_value = tkinter.StringVar()
+        self.l_offset_value.set('')
+        l_offset_entry = tkinter.Entry(major_window, textvariable=self.l_offset_value, bd=1, fg='blue', width=6, font=('Arial', self.font_24))
+        l_offset_entry.grid(row=0, column=3)
+
+        l_offset_label = tkinter.Label(major_window, text=" L ", font=('Arial', self.font_20))
+        l_offset_label.grid(row=0, column=4)
+
+        self.loglevel_value = tkinter.StringVar()
+        self.loglevel_value.set(self.log_level_label_info)
+        loglevel_label = tkinter.Label(major_window, textvariable=self.loglevel_value, width=2, font=('Arial', self.font_20))
+        loglevel_label.grid(row=0, column=5, columnspan=2)
+        loglevel_label.bind('<Double-1>', self.change_log_level)
+
+        self.price_display_offset_entry_value = tkinter.StringVar()
+        self.price_display_offset_entry_value.set('')
+        self.price_display_offset_entry = tkinter.Entry(major_window, textvariable=self.price_display_offset_entry_value, bd=1, fg='blue', width=5, font=('Arial', self.font_20))
+        self.price_display_offset_entry.grid(row=0, column=7)
+
+        self.price_display_offset_value_int = IntVar()
+        self.price_display_offset_value_int.set(0)
+        self.price_display_offset_checkbtn = Checkbutton(major_window, text="offset", font=('Arial', self.font_18),
+                                             variable=self.price_display_offset_value_int, onvalue=1, offvalue=0,
+                                             command=self.price_display_offset_mode)
+        self.price_display_offset_checkbtn.grid(row=0, column=8, columnspan=1)
+
+        self.price_display_offset_entry.bind('<Key-Return>', self.price_display_offset_entry_on_changed_event)
+
+
+    def change_log_level(self, event):
+        logger = logging.getLogger()
+
+        label_value = self.loglevel_value.get()
+        if self.log_level_label_info in label_value:
+            logging.info("switch to error level")
+            logger.setLevel(logging.ERROR)
+            self.loglevel_value.set(self.log_level_label_error)
+        else:
+            logger.setLevel(logging.INFO)
+            logging.info("switch to info level")
+            self.loglevel_value.set(self.log_level_label_info)
+
+    def config_offset_value(self):
+
+        h_off = float(self.h_offset_value.get())
+        l_off = float(self.l_offset_value.get())
+
+        if h_off > 0.0 :
+            self.ax_y_high_offset = h_off
+
+        if l_off >  0:
+            self.ax_y_low_offset = l_off
+
+        self.btn_offset.focus_set()
+        logging.info("offset changed")
+
+        self.update_graph()
+
+    def price_display_offset_mode(self):
+        if self.price_display_offset_value_int.get() == 1:
+            self.price_display_offset = float(self.price_display_offset_entry_value.get())
+        else:
+            self.price_display_offset = 0.0
+
+    def price_display_offset_entry_on_changed_event(self, event):
+        self.price_display_offset_mode()
+
+    def reconnect_datafeed(self):
+
+        if self.datafeed != None:
+            self.datafeed.reset_status()
+
+    def reconnect_df(self, event):
+        self.reconnect_datafeed()
+
+    def show_high_low_window(self, event):
+        # self.config_offset_frame.grid_forget()
+        # self.high_low_frame.grid(row=1, column=0, columnspan=5)
+
+        self.reload_datafeed_config()
+
+    def switch_config_offset_window(self, event):
+        if not self.config_panel_showed:
+
+            self.high_low_frame.grid_forget()
+
+            self.h_offset_value.set(self.ax_y_high_offset)
+            self.l_offset_value.set(self.ax_y_low_offset)
+
+            logger = logging.getLogger()
+            if logger.level == logging.INFO:
+                self.loglevel_value.set(self.log_level_label_info)
+            else:
+                self.loglevel_value.set(self.log_level_label_error)
+
+            self.config_panel_showed = True
+            self.config_offset_frame.grid(row=1, column=0, columnspan=5)
+        else:
+            self.config_offset_frame.grid_forget()
+            self.config_panel_showed = False
+            self.high_low_frame.grid(row=1, column=0, columnspan=5)
+
+    def btncallback(self):
+
+        self.sound_notified=False
+        # print("  buttom pressed  ")
+        self.B.focus_set()
+
+        if self.get_btn_label() == self.btn_label_hold:
+            self.set_btn_label(self.btn_label_start)
+            self.E1['bg']=label_default_color
+            self.E2['bg']=label_default_color
+            high_price = self.get_high_price()
+            low_price = self.get_low_price()
+            # if high_price == '':
+            #     high_price = '0.0'
+            # if low_price == '':
+            #     low_price = '0.0'
+
+            # -20 意思是最后2小时
+            # 若为空值，则取2小时内的最大/最小值
+            if high_price == '':
+                high_price = str(max(self.price_data[self.count-20:self.count]))
+            if low_price == '':
+                low_price = str(min(self.price_data[self.count-20:self.count]))
+
+            if high_price == '0.0' and low_price == '0.0':
+                self.alert_price_above = round(float(self.last_price)+float(self.price_threshold), self.digit_after_dot)
+                self.alert_price_below = round(float(self.last_price)-float(self.price_threshold), self.digit_after_dot)
+            else:
+                self.alert_price_above = round(float(high_price),self.digit_after_dot)
+                self.alert_price_below = round(float(low_price),self.digit_after_dot)
+
+            self.E1_value.set(str(self.alert_price_above))
+            self.E2_value.set(str(self.alert_price_below))
+
+            self.alert_price_above_line_color = alert_price_line_color_default
+            self.alert_price_below_line_color = alert_price_line_color_default
+
+            self.play_price_sound=True
+            # self.hline_style = self.hline_style_alert
+
+        elif self.get_btn_label() == self.btn_label_start:
+            self.set_btn_label(self.btn_label_hold)
+            self.alert_price_above = 0.0
+            self.alert_price_below = 0.0
+            self.play_price_sound=False
+            # self.L1['bg']=label_default_color
+            # self.L2['bg']=label_default_color
+            self.E1['bg']=label_default_color
+            self.E2['bg']=label_default_color
+            # self.hline_color = self.hline_color_default
+            # self.hline_style = self.hline_style_default
+
+        self.update_graph()
+
+    def get_high_price(self):
+        return self.E1.get()
+
+    def get_low_price(self):
+        return self.E2.get()
+
+    def get_btn_label(self):
+        return self.button_value.get()
+
+    def set_btn_label(self, text):
+        self.button_value.set(text)
+        if text == self.btn_label_start:
+            self.B['fg'] = 'teal'
+        else:
+            self.B['fg'] = 'black'
+
+
+    def set_entry_alert_bg(self, label_tag):
+
+        # if 'high' in label_tag:
+        #         self.E1['bg'] = label_alert_color
+        # elif 'low' in label_tag:
+        #         self.E2['bg'] = label_alert_color
+
+        def run(*args):
+            blink_count = 6
+            if 'high' in label_tag:
+                    for i in range(blink_count):
+                        if int(i) % 2 == 0:
+                            self.E1['bg'] = label_alert_color
+                        else:
+                            self.E1['bg'] = label_blink_color
+                        time.sleep(1)
+
+                    if self.sound_notified:
+                        self.E1['bg'] = label_alert_color
+                    else:
+                        self.E1['bg'] = label_default_color
+
+            elif 'low' in label_tag:
+                    for i in range(blink_count):
+                        if int(i) % 2 == 0:
+                            self.E2['bg'] = label_alert_color
+                        else:
+                            self.E2['bg'] = label_blink_color
+                        time.sleep(1)
+
+                    if self.sound_notified:
+                        self.E2['bg'] = label_alert_color
+                    else:
+                        self.E2['bg'] = label_default_color
+
+        thread.start_new_thread(run, ())
+
+    def L1_double_event(self, event):
+
+        self.E1_value.set(str(''))
+        self.E2_value.set(str(''))
+        self.E1['bg'] = label_default_color
+        self.E2['bg'] = label_default_color
+        self.play_price_sound = False
+        self.set_btn_label(self.btn_label_hold)
+
+        self.set_scrolling_msg_label("......")
+        self.show_scrolling_msg=True
+
+
+    def L2_double_event(self, event):
+        # self.show_scrolling_msg=False
+        self.set_scrolling_msg_label('Alert time: %s      Price: %s' % (self.price_change_notify_time, str(self.alert_price)))
+
+    def Entry_on_changed_event(self, event):
+        self.entry_changed()
+
+    def entry_changed(self):
+
+        self.sound_notified=False
+        # print("  entry return pressed  ")
+        self.B.focus_set()
+
+        if self.get_btn_label() == self.btn_label_hold:
+            self.set_btn_label(self.btn_label_start)
+        self.E1['bg']=label_default_color
+        self.E2['bg']=label_default_color
+        high_price = self.get_high_price()
+        low_price = self.get_low_price()
+        if high_price == '':
+            high_price = '0.0'
+        if low_price == '':
+            low_price = '0.0'
+
+        if high_price == '0.0' and low_price == '0.0':
+            self.alert_price_above = round(float(self.last_price)+float(self.price_threshold), self.digit_after_dot)
+            self.alert_price_below = round(float(self.last_price)-float(self.price_threshold), self.digit_after_dot)
+            self.E1_value.set(str(self.alert_price_above))
+            self.E2_value.set(str(self.alert_price_below))
+        else:
+            self.alert_price_above = round(float(high_price),self.digit_after_dot)
+            self.alert_price_below = round(float(low_price),self.digit_after_dot)
+        self.play_price_sound=True
+
+        self.alert_price_above_line_color = alert_price_line_color_default
+        self.alert_price_below_line_color = alert_price_line_color_default
+
+        self.update_graph()
+
+    def btn_high_plus_event(self):
+
+        if self.E1_value.get() == '':
+            return
+
+        self.alert_price_above = round(float(self.E1_value.get()) + float(self.minor_adjust_gap), self.digit_after_dot)
+        self.E1_value.set(str(self.alert_price_above))
+        self.entry_changed()
+
+    def btn_high_minus_event(self):
+
+        if self.E1_value.get() == '':
+            return
+
+        self.alert_price_above = round(float(self.E1_value.get()) - float(self.minor_adjust_gap), self.digit_after_dot)
+        self.E1_value.set(str(self.alert_price_above))
+        self.entry_changed()
+
+    def btn_low_plus_event(self):
+
+        if self.E2_value.get() == '':
+            return
+
+        self.alert_price_below = round(float(self.E2_value.get()) + float(self.minor_adjust_gap), self.digit_after_dot)
+        self.E2_value.set(str(self.alert_price_below))
+        self.entry_changed()
+
+    def btn_low_minus_event(self):
+
+        if self.E2_value.get() == '':
+            return
+
+        self.alert_price_below = round(float(self.E2_value.get()) - float(self.minor_adjust_gap), self.digit_after_dot)
+        self.E2_value.set(str(self.alert_price_below))
+        self.entry_changed()
+
+    def set_scrolling_msg_label(self, label_text):
+        self.scrolling_msg_label_value.set(label_text)
+
+    def scrolling_msg_label_double_event(self, event):
+
+        self.scrolling_msg_label.config(bg='lightgrey')
+
+        if self.warning_msg_alerted:
+            self.warning_msg_alerted = False
+
+        self.show_scrolling_msg = True
+
+        self.set_scrolling_msg_label(self.scrolling_msg_label_value.get())
+
+    def show_scrolling_msg_content(self):
+
+        if self.show_scrolling_msg:
+            rand_num = random.randint(1, 10)
+            # 20%的时候更换words
+            if rand_num > 8:
+                looping_list = self.looping_words.split('//')
+                if looping_list.__len__() > 1:
+                    position = random.randint(0, looping_list.__len__() - 1)
+                    self.set_scrolling_msg_label(looping_list[position])
+
+    def update_graph(self):
+        try:
+            self.render(self.count, float(self.prod_price), window_size=self.time_seq_window_size)
+            self.root_window.update()
+        except Exception as e:
+            logging.error(e)
+
+    def get_ax_y_low(self):
+        return self.ax_y_low_offset
+
+    def _render_net_worth(self, current_step, net_worth, step_range, dates):
+
+        price_display_data = self.price_data + self.price_display_offset
+        net_worth_display = net_worth + self.price_display_offset
+
+        # Clear the frame rendered last step
+        self.net_worth_ax.clear()
+
+        self.net_worth_ax.yaxis.grid(b=True, color='grey', linestyle='-', linewidth=0.1)
+        self.net_worth_ax.xaxis.grid(b=True, color='grey', linestyle='-', linewidth=0.1)
+
+        # self.net_worth_ax.spines["top"].set_visible(False)
+        # self.net_worth_ax.spines["left"].set_visible(False)
+
+        self.net_worth_ax.spines["top"].set_linewidth(0.1)
+        self.net_worth_ax.spines["left"].set_linewidth(0.1)
+
+        # plt.tick_params(axis='y',labelsize=14)
+        # plt.tick_params(axis='x',labelsize=12)
+
+        self.net_worth_ax.tick_params(axis='y',labelsize=14)
+        self.net_worth_ax.tick_params(axis='x',labelsize=12)
+
+        # Plot net worths
+        formatter = DateFormatter('%H:%M')
+
+        # 最后一条数据拉开距离显示
+        if dates.size > 1:
+            dates[dates.size - 1] = dates[dates.size - 2] + 0.0035
+
+
+        # self.net_worth_ax.plot_date(
+        #     dates, self.price_data[step_range], '-', label='Net Worth')
+        self.net_worth_ax.plot_date(
+            dates, price_display_data[step_range], '-', label='Net Worth')
+        self.net_worth_ax.xaxis.set_major_formatter(formatter)
+
+        last_date = dates[dates.size - 1]
+        # last_net_worth = self.price_data[current_step]
+        last_net_worth = price_display_data[current_step]
+
+        # Annotate the current net worth on the net worth graph
+        # 标注再拉开少许距离
+        self.net_worth_ax.annotate(self.annotate_offset.format(net_worth_display), (last_date, last_net_worth),
+                                   xytext=(last_date+0.015, last_net_worth),
+                                   bbox=dict(boxstyle='round',
+                                             fc='w', ec='k', lw=1),
+                                   color="red",
+                                   fontsize="x-large")
+
+
+        # Add space above and below min/max net worth
+        # net_worth_partial = self.price_data[step_range]
+        net_worth_partial = price_display_data[step_range]
+
+        if self.min_max == 'min_max':
+            btm = min(net_worth_partial[np.nonzero(net_worth_partial)])-self.ax_y_low_offset
+            top = max(net_worth_partial)+self.ax_y_high_offset
+        elif self.min_max == 'min':
+            btm = min(net_worth_partial[np.nonzero(net_worth_partial)])-self.ax_y_low_offset
+            if (last_net_worth - min(net_worth_partial[np.nonzero(net_worth_partial)]) + self.ax_y_low_offset) < self.offset_ref:
+                top = btm + self.offset_ref
+            else:
+                top = last_net_worth+self.ax_y_high_offset
+        elif self.min_max == 'max':
+            top = max(net_worth_partial)+self.ax_y_high_offset
+            if (max(net_worth_partial) - last_net_worth + self.ax_y_high_offset) < self.offset_ref:
+                btm = top - self.offset_ref
+            else:
+                btm = last_net_worth-self.ax_y_low_offset
+        elif self.min_max == 'rel':
+            btm = last_net_worth-self.ax_y_low_offset
+            top = last_net_worth+self.ax_y_high_offset
+        else:
+            btm = self.ax_y_low_offset
+            top = self.ax_y_high_offset
+
+        self.net_worth_ax.set_ylim(btm,top)
+    
+    def render(self, current_step, net_worth, window_size=100):
+
+        self.price_data[current_step] = net_worth
+
+        price_display_data = self.price_data + self.price_display_offset
+        net_worth_display = net_worth + self.price_display_offset
+
+        # 偏移5分钟
+
+        nowTime = (datetime.datetime.today()-datetime.timedelta(seconds=300)).strftime("%Y-%m-%d %H:%M:%S")
+
+        self.dataframe_time.loc[current_step] = nowTime
+        if current_step > self.last_refreshed_data_count:
+            self.dataframe_time.loc[current_step] = (datetime.datetime.today()).strftime("%Y-%m-%d %H:%M:%S")
+        logging.info(' nowTime = ' + str(nowTime))
+
+        if self.refresh_figure:
+            window_start = max(current_step - window_size, 0)
+            step_range = range(window_start, current_step + 1)
+
+            # Format dates as timestamps, necessary for candlestick graph
+            dates = np.array([self.date2num(x)
+                              for x in self.dataframe_time['Open'].values[step_range]])
+
+            logging.info(' step_range = '+ str(step_range))
+            self._render_net_worth(current_step, net_worth, step_range, dates)
+
+            self.net_worth_ax.hlines(price_display_data[current_step], xmin=dates[0], xmax=dates[dates.size-1]+0.012,
+                       color=self.hline_color, linestyle=self.hline_style, linewidth=1.2)
+
+            try:
+                if len(self.price_deque) > 0:
+
+                    # current_high = float(max(self.price_deque))
+                    # current_low = float(min(self.price_deque))
+
+                    current_high = float(max(self.price_deque)) +  self.price_display_offset
+                    current_low = float(min(self.price_deque)) + self.price_display_offset
+
+                    if current_high > 0.0 and current_low > 0.0:
+                        self.net_worth_ax.hlines(current_high, xmin=dates[dates.size-1]-0.015, xmax=dates[dates.size-1]+0.01,
+                               color=self.curr_highline_color, linestyle=self.hline_style_default, linewidth=1.5)
+
+                        self.net_worth_ax.hlines(current_low, xmin=dates[dates.size-1]-0.015, xmax=dates[dates.size-1]+0.01,
+                               color=self.curr_lowline_color, linestyle=self.hline_style_default, linewidth=1.5)
+
+                        # add price value together with hlines
+                        if self.annotate_high_low_price:
+                            dict_high = dict(arrowstyle="-", color="0.5", patchB=None, shrinkB=16,  linestyle="dashed", connectionstyle="arc3,rad=0.2",)
+                            dict_low = dict(arrowstyle="-", color="0.5", patchB=None, shrinkB=16,  linestyle="dashed", connectionstyle="arc3,rad=-0.2",)
+
+                            annote_price_high_posi_times_adj = 8
+                            annote_nprice_low_posi_times_adj = 6
+
+                            if (current_high - current_low) >= (self.minor_adjust_gap * 8):
+                                annote_price_high_posi_times_adj = 6
+                                annote_nprice_low_posi_times_adj = 4
+
+                            annotate_y_high = current_high + self.minor_adjust_gap * annote_price_high_posi_times_adj
+                            annotate_y_low = current_low - self.minor_adjust_gap * annote_nprice_low_posi_times_adj
+
+                            if annotate_y_high > self.ax_y_high_offset:
+                                annotate_y_high = self.ax_y_high_offset - self.minor_adjust_gap
+
+                            if annotate_y_low < self.ax_y_low_offset + self.minor_adjust_gap * 3:
+                                annotate_y_low = self.ax_y_low_offset + self.minor_adjust_gap * 3 + self.minor_adjust_gap
+
+                            self.net_worth_ax.annotate(self.annotate_offset.format(current_high), (dates[dates.size-1] + 0.005, current_high),
+                                                       xytext=(dates[dates.size-1] + 0.025, annotate_y_high),
+                                                       #arrowprops=dict_high,
+                                                       horizontalalignment='right', color='LightSlateGrey', verticalalignment='top',fontsize='large')
+                                                       #horizontalalignment，verticalalignment和fontsize，从annotate传给Text(local max)
+
+                            self.net_worth_ax.annotate(self.annotate_offset.format(current_low), (dates[dates.size-1] + 0.005, current_low),
+                                                       xytext=(dates[dates.size-1] + 0.025, annotate_y_low),
+                                                       #arrowprops=dict_low,
+                                                       horizontalalignment='right', color='LightSlateGrey', verticalalignment='top',fontsize='large')
+
+            except Exception as e:
+                logging.error(e)
+
+            # 高低告警位置
+            if self.play_price_sound:
+
+                if (self.alert_price_above) > 0.0:
+
+                    # self.net_worth_ax.hlines(self.alert_price_above, xmin=dates[0], xmax=dates[dates.size - 1] + 0.012,
+                    #            color='purple', linestyle=self.hline_style_alert, linewidth=1.2)
+                    self.net_worth_ax.hlines(self.alert_price_above, xmin=dates[0], xmax=dates[dates.size - 5],
+                               color=self.alert_price_above_line_color, linestyle=self.hline_style_alert, linewidth=1.5)
+                if self.alert_price_below > 0.0:
+
+                    self.net_worth_ax.hlines(self.alert_price_below, xmin=dates[0], xmax=dates[dates.size - 5],
+                               color=self.alert_price_below_line_color, linestyle=self.hline_style_alert, linewidth=1.5)
+
+            #显示market open reminder位置
+            list_length = len(self.market_open_list)
+
+            if list_length > 0 and dates.size > 10 :
+                for i in range(list_length-1,-1,-1): # backwards to popup element
+                    market_open_num = self.market_open_list[i]
+                    if (market_open_num > dates[dates.size-5]) and (market_open_num < (dates[dates.size-1]+0.014)):
+                        self.net_worth_ax.vlines(market_open_num, ymin=self.ax_y_low_offset, ymax=self.ax_y_low_offset + self.minor_adjust_gap*6,
+                                                 color='blue', linewidth=5)
+
+                    elif (market_open_num < dates[dates.size-5]):
+                        self.market_open_list.pop(i)
+
+
+            x = dates
+            y = price_display_data[step_range]
+            self.net_worth_ax.fill_between(x, y, alpha=0.1, color='C0')
+
+            self.canvas.draw()
+
+    def set_para(self, offset_ref, ylow, yhigh, min_max, refresh_fig, price_th):
+        self.offset_ref = offset_ref
+
+        self.min_max = min_max
+        self.refresh_figure=refresh_fig
+        self.price_threshold = price_th
+
+    def close(self):
+        plt.close()
+
+    def update_realtime_high_low(self):
+        high_value = round(max(self.price_deque), self.round_po_num)
+        low_value = round(min(self.price_deque), self.round_po_num)
+
+        self.realtime_price_highest_text.set(str(high_value).ljust(self.number_position_to_adjuct, '0'))
+        self.realtime_price_lowest_text.set(str(low_value).ljust(self.number_position_to_adjuct, '0'))
+
+
+    def set_alert_bg(self, label_tag):
+        self.set_entry_alert_bg(label_tag)
+
+    def notify_change(self, price, count, buy=0.0, sell=0.0, fetch_time=''):
+
+	updated = True
+
+        if (fetch_time != '') \
+                and (self.last_price_fetchtime != '') \
+                and (not self.if_new_update_time(new_time=fetch_time, last_time=self.last_price_fetchtime)):
+            logging.info("invalid price = " + str(price))
+            updated = False
+        else:
+            logging.info("get new price = " + str(price))
+
+            if (count == 0) or (count < self.count):
+                count = self.count
+            elif(count > self.count):
+                logging.info("got new count = " + str(count))
+                # self.prod_volume = 0
+                # self.volume_update_receive_time = ''
+            if float(price) == 0.0:
+                price = self.prod_price
+            else:
+                price = float(price)
+                if self.change_data_direction_flag:
+                    self.prod_price = self.change_data_direction_factor - price
+                else:
+                    self.prod_price = price
+
+            playsound = False
+
+
+            self.count = count
+            self.last_price_fetchtime = fetch_time
+
+            # update here
+            self.price_data[self.count] = self.prod_price
+            # 偏移5分钟
+
+            nowTime = (datetime.datetime.today()-datetime.timedelta(seconds=300)).strftime("%Y-%m-%d %H:%M:%S")
+            self.dataframe_time.loc[self.count] = nowTime
+
+
+            # 从此处更新会造成程序崩溃
+
+            self.price_deque.append(self.prod_price)
+
+            self.update_realtime_high_low()
+
+            if self.play_price_sound and (not self.sound_notified):
+
+                if (self.alert_price_above != 0.0) and self.prod_price >= self.alert_price_above:
+                    playsound = True
+                    self.alert_price_above_line_color = alert_price_high_color
+                    self.high_low_prefix = price_high_posi
+                elif (self.alert_price_below != 0.0) and self.prod_price <= self.alert_price_below:
+                    playsound = True
+                    self.alert_price_below_line_color = alert_price_below_color
+                    self.high_low_prefix = price_low_posi
+
+                if playsound:
+                    self.sound_notified = True
+                    # self.high_low_prefix = self.prod_name +': ' + self.high_low_prefix
+                    self.high_low_prefix = self.high_low_prefix + ': ' + self.prod_name
+
+                    if price_high_posi in self.high_low_prefix:
+                        self.set_alert_bg('high')
+                    elif price_low_posi in self.high_low_prefix:
+                        self.set_alert_bg('low')
+                    self.price_change_notify_time = datetime.datetime.now().strftime("%H:%M:%S")
+                    self.alert_price = price
+                    self.play_sound(self.high_low_prefix, voice='Ting-Ting')
+                    # self.play_sound(self.high_low_prefix + str(price))
+
+                    # grph.hline_color = grph.hline_color_alert
+
+            self.last_price = price
+
+        return updated
+
+    def notify_volume_change(self, volume=0, time='', min_gap='', volume_reset=False, vol_ref_count=0):
+
+        if (self.count == self.last_volume_count) and volume <= int(self.last_volume):
+            logging.info("------ invalid volume ------")
+            return
+        elif (self.count != self.last_volume_count) and (not self.if_new_update_time(new_time=time, last_time=self.last_price_fetchtime)):
+            time = self.last_price_fetchtime
+            volume = 0
+        else:
+            logging.info("------ update volume ------")
+
+        if time != '':
+            formated_time = '0' + str((int(time[-4]) % 5)) + time[-3:]
+        else:
+            formated_time = ''
+        label_text = " ---     " + str(volume) + "     ---              " + '( ' + formated_time + ' )'
+
+        self.set_scrolling_msg_label(label_text)
+        self.last_volume = volume
+        self.last_volume_fetchtime = time
+        self.last_volume_count = self.count
+
+
+    def is_volume_updated(self):
+        return False
+
+    def notify_msg(self, text_to_show):
+
+        self.scrolling_msg_label.config(bg='yellow')
+        self.warning_msg_alerted = True
+
+
+    def date2num(self, date):
+        date = date[:-3] # 用于图形显示的时候， 去掉秒钟
+        return mdates.datestr2num(date)
+
+    def schedule_tasks(self):
+        self.load_config()
+
+    def load_config(self):
+        try:
+            cf = configparser.ConfigParser()
+            cf.read(self.cfg_filename)
+
+            refresh_figure = cf.getboolean('config', 'refresh_figure')
+            self.time_to_wait = cf.getint('config', 'time_to_wait')
+            offset_ref = cf.getfloat('config', 'offset_ref')
+            ylow = cf.getfloat('config', 'ax_y_low_offset')
+            yhigh = cf.getfloat('config', 'ax_y_high_offset')
+            min_max = cf.get('config', 'min_max')
+            price_threshold = cf.getfloat('config', 'price_threshold')
+            self.looping_words = cf.get('config', 'scrolling_msg')
+            # monnth_to_fetch = cf.get('config', 'month_to_fetch')
+
+            self.set_para(offset_ref,ylow, yhigh, min_max, refresh_figure, price_threshold)
+
+        except Exception as e:
+            logging.info(e)
+
+    def reload_datafeed_config(self):
+        logging.info("------ reloading datafeed special config ------")
+        if len(self.datafeed_list) > 0:
+            for i in range(len(self.datafeed_list)):
+                datafeed_inst = self.datafeed_list[i]
+                datafeed_inst.reload_special_config()
+
+    def add_datafeed(self, datafeed):
+        self.datafeed_list.append(datafeed)
+
+    def modify_data_direction(self, data_raw, data_factor=0):
+
+        modified_data = data_raw
+
+        for i in range(len(data_raw)):
+            modified_data[i] = data_factor - data_raw[i]
+
+        return modified_data
+
+    def new_run(self, datafeed,  main_window=None,  use_main=False,
+                window_width=0.0, window_height=0.0, time_seq_length=0):
+
+        data_name = datafeed.get_data_name()
+        self.prod_name = datafeed.get_prod_name()
+        self.price_data, self.dataframe_time, self.count = datafeed.get_price_and_time()
+
+        if self.change_data_direction_flag:
+            self.price_data = self.modify_data_direction(self.price_data, self.change_data_direction_factor)
+
+        self.prod_price = self.price_data[self.count-1]
+
+        datafeed.set_graph_instance(self)
+
+        # start datafeed connnection by a thread
+        datafeed_loading_thread = Datafeed_loading_thread(datafeed=datafeed)
+        datafeed_loading_thread.start()
+
+        self.datafeed = datafeed
+        self.add_datafeed(datafeed)
+        # show window
+        self.manual_init(data_name, main_window,  use_main,
+                         window_width=window_width, window_height=window_height, time_seq_length=time_seq_length)
+
+
+    # 手动设置产品名称
+    def set_prod_name(self, prod_name):
+        self.prod_name = prod_name
+
+		
